@@ -4,7 +4,6 @@
 import os
 import re
 import sys
-import json
 import gzip
 import pysam
 import logging
@@ -20,6 +19,18 @@ __email__ = "113178210@qq.com"
 __all__ = []
 
 
+def get_sample(file):
+
+    name = file.split('/')[-1]
+
+    if '--' in name:
+        name = name.split('--')[1].split('.bam')[0]
+    else:
+        name = name.split('.')[0]
+
+    return name
+
+
 def read_fasta(file):
     '''Read fasta file'''
 
@@ -33,6 +44,8 @@ def read_fasta(file):
     seq = ''
 
     for line in fp:
+        if type(line) == type(b''):
+            line = line.decode('utf-8')
         line = line.strip()
 
         if not line:
@@ -69,6 +82,8 @@ def read_fastq(file):
     seq = []
 
     for line in fp:
+        if type(line) == type(b''):
+            line = line.decode('utf-8')
         line = line.strip()
 
         if not line:
@@ -103,21 +118,9 @@ def read_bam(file):
     fh.close()
 
 
-def n50(lengths):
+def read_ccs(file):
 
-    sum_length = sum(lengths)
-    accu_length = 0
-
-    for i in sorted(lengths, reverse=True):
-        accu_length += i
-
-        if accu_length >= sum_length*0.5:
-            return i
-
-
-def read_length(file):
-
-    length = []
+    reads = set()
 
     if file.endswith(".fasta") or file.endswith(".fa") or file.endswith(".fa.gz") or file.endswith(".fasta.gz"):
         fh = read_fasta(file)
@@ -129,45 +132,53 @@ def read_length(file):
         raise Exception("%r file format error" % file)
 
     for line in fh:
-        length.append(len(line[1]))
+        seqid = line[0]
+        ccsid = line[0].split('/ccs')[0]
 
-    return length
+        reads.add(ccsid)
+
+    return reads
 
 
-def stat_reads(files, out):
+def ccs2sub(file, ccs, output):
 
-    title = ["Sample", "Bases(bp)", "Reads number", "Mean Length(bp)", "N50(bp)", "Longest(bp)"]
-    data = collections.OrderedDict()
-    sample = collections.OrderedDict()
-    fo = open(out, 'w')
-    fo.write('Sample\tBases(bp)\tReads number\tMean Length(bp)\tN50(bp)\tLongest(bp)\n')
-    for file in files:
-        name = file.split('/')[-1]
+    reads = read_ccs(ccs)
+    name = get_sample(ccs)
 
-        if '--' in name:
-            name = name.split('--')[1].split('.bam')[0]
-        else:
-            name = name.split('.')[0]
-        data[name] = collections.OrderedDict()
-        sample[name] = [name, "", ""]
-        length = read_length(file)
+    if file.endswith(".bam"):
+        fh = pysam.AlignmentFile(file, "rb", check_sq=False)
+    elif file.endswith(".sam"):
+        fh = pysam.AlignmentFile(file, 'r')
+    else:
+        raise Exception("%r file format error" % file)
 
-        fo.write('{0}\t{1:,}\t{2:,}\t{3:,.2f}\t{4:,}\t{5:,}\n'.format(name, sum(length), len(length), sum(length)*1.0/len(length), n50(length), max(length)))
-        line = [name, sum(length), len(length), round(sum(length)*1.0/len(length), 2), n50(length), max(length)]
-        for i in range(len(title)-1):
-            data[name][title[i+1]] = line[i+1]
+    fname = os.path.abspath(output)
+
+    if os.path.exists(fname):
+        os.remove(fname)
+
+    fo = pysam.AlignmentFile(fname, "wb", template=fh)
+
+    for line in fh:
+        seqid = line.qname.split('/')
+        ccsid = '/'.join(seqid[0:2])
+
+        if ccsid not in reads:
+            continue
+        fo.write(line)
+
+    fh.close()
     fo.close()
-    print("field = %s" % json.dumps(title))
-    print("summary = %s" % json.dumps(data))
-    print("sample_lib_lane = %s" % json.dumps(sample))
 
 
 def add_hlep_args(parser):
 
-    parser.add_argument('-i', '--input', nargs='+', metavar='FILE', type=str, required=True,
-        help='Input reads file, format(fasta,fastq,fa.gz,bam and sam).')
-    parser.add_argument('-o', '--out', metavar='STR', type=str, default="out.tsv",
-        help='Out name')
+    parser.add_argument('subreads',
+        help='Input subreads file, format(bam and sam).')
+    parser.add_argument('-c', '--ccs', metavar='FILE', type=str, required=True,
+        help='Input the CCS reads file, format(bam, sam, fastq, fasta).')
+    parser.add_argument('-o', '--out', metavar='FILE', type=str, default='out.subreads.bam',
+        help='Output file.')
 
     return parser
 
@@ -182,19 +193,17 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
     description='''
 name:
-    stat_barcode.py  Statistics split reads
+    ccs2sub.py Obtain subreads according to CCS reads.
 
 attention:
-    stat_barcode.py -i *.bam
-    stat_barcode.py -i *.fa
-    stat_barcode.py -i *.fq
+    ccs2sub.py subreads.bam --ccs ccs.fa --out out.subreads.bam
 version: %s
 contact:  %s <%s>\
         ''' % (__version__, ' '.join(__author__), __email__))
 
     args = add_hlep_args(parser).parse_args()
 
-    stat_reads(args.input, args.out)
+    ccs2sub(args.subreads, args.ccs, args.out)
 
 
 if __name__ == "__main__":
